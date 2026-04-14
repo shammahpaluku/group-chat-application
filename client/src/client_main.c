@@ -843,18 +843,28 @@ void handle_login() {
 }
 
 // Main function
-int main() {
+int main(int argc, char *argv[]) {
+    const char *server_ip = SERVER_IP;
+    
+    // Allow server IP as command line argument
+    if (argc > 1) {
+        server_ip = argv[1];
+        printf("[+] Using server IP: %s\n", server_ip);
+    } else {
+        printf("[+] Using default server IP: %s\n", server_ip);
+    }
+    
     // Connect
-    g_sock = nh_client_connect(SERVER_IP, SERVER_PORT);
+    g_sock = nh_client_connect(server_ip, SERVER_PORT);
     if (g_sock == ERR_CONN) {
         printf("============================================\n");
         printf("  Cannot connect to Group Chat server.\n");
-        printf("  Expected: %s:%d\n", SERVER_IP, SERVER_PORT);
-        printf("  Please start the server first.\n");
+        printf("  Expected: %s:%d\n", server_ip, SERVER_PORT);
+        printf("  Please start server first.\n");
         printf("============================================\n");
         return 1;
     }
-    printf("[+] Connected to Group Chat server.\n");
+    printf("[+] Connected to Group Chat server at %s:%d.\n", server_ip, SERVER_PORT);
     
     // Main unauthenticated menu loop
     while (1) {

@@ -18,7 +18,7 @@
 #define MAX_LINE_LEN    1024
 
 // Server config
-#define SERVER_IP       "127.0.0.1"
+#define SERVER_IP       "0.0.0.0"  // Bind to all interfaces for network access
 #define SERVER_PORT     9200
 #define CMD_BUF_LEN     1024
 #define BACKLOG         5
