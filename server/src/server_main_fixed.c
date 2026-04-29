@@ -86,6 +86,28 @@ static void cmd_logout(int sock, struct sockaddr_in *client_addr, char *args) {
     nh_send_to(sock, "OK", client_addr);
 }
 
+static void cmd_create_group(int sock, struct sockaddr_in *client_addr, char *args) {
+    char *group_name = strtok(args, " ");
+    char *description = args + strlen(group_name) + 1;
+    
+    if (!group_name) {
+        nh_send_to(sock, "ERR_AUTH", client_addr);
+        return;
+    }
+    
+    wire_to_str(group_name);
+    wire_to_str(description);
+    
+    int result = grp_create(group_name, description);
+    if (result == SUCCESS) {
+        char response[64];
+        snprintf(response, sizeof(response), "OK %d", result);
+        nh_send_to(sock, response, client_addr);
+    } else {
+        nh_send_to(sock, err_string(result), client_addr);
+    }
+}
+
 static void dispatch_command(int sock, struct sockaddr_in *client_addr, char *cmd_buf) {
     char cmd_copy[CMD_BUF_LEN];
     strncpy(cmd_copy, cmd_buf, CMD_BUF_LEN - 1);
@@ -104,12 +126,38 @@ static void dispatch_command(int sock, struct sockaddr_in *client_addr, char *cm
     
     if (strcmp(verb, "REGISTER") == 0) {
         cmd_register(sock, client_addr, args);
+    } else if (strcmp(verb, "REGISTER") == 0) {
+        cmd_register(sock, client_addr, args);
     } else if (strcmp(verb, "LOGIN") == 0) {
         cmd_login(sock, client_addr, args);
     } else if (strcmp(verb, "LOGOUT") == 0) {
         cmd_logout(sock, client_addr, args);
+    } else if (strcmp(verb, "CREATE_GROUP") == 0) {
+        cmd_create_group(sock, client_addr, args);
     } else {
         nh_send_to(sock, "ERR_UNKNOWN", client_addr);
+    }
+}
+
+static void cmd_create_group(int sock, struct sockaddr_in *client_addr, char *args) {
+    char *group_name = strtok(args, " ");
+    char *description = args + strlen(group_name) + 1;
+    
+    if (!group_name) {
+        nh_send_to(sock, "ERR_AUTH", client_addr);
+        return;
+    }
+    
+    wire_to_str(group_name);
+    wire_to_str(description);
+    
+    int result = grp_create(group_name, description);
+    if (result == SUCCESS) {
+        char response[64];
+        snprintf(response, sizeof(response), "OK %d", result);
+        nh_send_to(sock, response, client_addr);
+    } else {
+        nh_send_to(sock, err_string(result), client_addr);
     }
 }
 
