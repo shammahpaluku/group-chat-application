@@ -14,6 +14,8 @@ static Session current_session = {0, -1, ""};
 int auth_find_user_by_name(const char *username) {
     if (!username) return ERR_NOT_FOUND;
     
+    printf("[DEBUG] Looking for user '%s' in %d users\n", username, g_user_count);
+    
     char search_lower[MAX_UNAME_LEN];
     strncpy(search_lower, username, sizeof(search_lower) - 1);
     search_lower[sizeof(search_lower) - 1] = '\0';
@@ -27,11 +29,15 @@ int auth_find_user_by_name(const char *username) {
         user_lower[sizeof(user_lower) - 1] = '\0';
         utils_to_lowercase(user_lower);
         
+        printf("[DEBUG] Comparing '%s' with stored '%s'\n", search_lower, user_lower);
+        
         if (strcmp(user_lower, search_lower) == 0) {
+            printf("[DEBUG] Found user at index %d\n", i);
             return i; // Return array index
         }
     }
     
+    printf("[DEBUG] User not found\n");
     return ERR_NOT_FOUND;
 }
 
@@ -53,22 +59,31 @@ int auth_user_exists(const char *username) {
 
 // Registration and login
 int auth_register(const char *username, const char *display_name, const char *plain_password) {
+    printf("[DEBUG] Registration attempt: username='%s', display='%s', password='%s'\n", 
+           username ? username : "(null)", 
+           display_name ? display_name : "(null)", 
+           plain_password ? plain_password : "(null)");
+    
     // Validate inputs
     if (utils_is_empty(username) || utils_is_empty(display_name) || utils_is_empty(plain_password)) {
+        printf("[DEBUG] Validation failed: empty fields\n");
         return ERR_AUTH;
     }
     
     if (strlen(plain_password) < 4) {
+        printf("[DEBUG] Validation failed: password too short (len=%zu)\n", strlen(plain_password));
         return ERR_AUTH;
     }
     
     // Check for duplicate username
     if (auth_user_exists(username)) {
+        printf("[DEBUG] Validation failed: username '%s' already exists\n", username);
         return ERR_DUPLICATE;
     }
     
     // Check capacity
     if (g_user_count >= MAX_USERS) {
+        printf("[DEBUG] Validation failed: user limit reached (%d/%d)\n", g_user_count, MAX_USERS);
         return ERR_FULL;
     }
     

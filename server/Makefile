@@ -8,7 +8,7 @@ SRCS = src/file_io.c \
        src/groups.c \
        src/messaging.c \
        src/net_handler.c \
-       src/server_main.c
+       src/server_main_fixed.c
 
 TARGET = bin/chat_server
 

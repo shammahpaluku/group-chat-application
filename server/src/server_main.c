@@ -6,11 +6,12 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
-#include <mqueue.h>
 #include "config.h"
+#include "net_handler.h"
 #include "file_io.h"
 #include "utils.h"
 #include "auth.h"
+#include "session_manager.h"
 #include "groups.h"
 #include "messaging.h"
 #include "net_handler.h"
@@ -34,11 +35,21 @@ static void str_to_wire(char *str) { utils_replace_char(str, ' ', '_'); }
 
 // Command handlers
 static void cmd_register(int sock, struct sockaddr_in *client_addr, char *args) {
+    printf("[DEBUG] Registration command from %s:%d: args='%s'\n", 
+           inet_ntoa(client_addr->sin_addr), ntohs(client_addr->sin_port), 
+           args ? args : "(null)");
+    
     char *username = strtok(args, " ");
     char *display_name = strtok(NULL, " ");
     char *password = strtok(NULL, " ");
     
+    printf("[DEBUG] Parsed: username='%s', display='%s', password='%s'\n", 
+           username ? username : "(null)",
+           display_name ? display_name : "(null)", 
+           password ? password : "(null)");
+    
     if (!username || !display_name || !password) {
+        printf("[DEBUG] Missing registration fields\n");
         nh_send_to(sock, "ERR_AUTH", client_addr);
         return;
     }
@@ -46,45 +57,75 @@ static void cmd_register(int sock, struct sockaddr_in *client_addr, char *args) 
     wire_to_str(username);
     wire_to_str(display_name);
     
+    printf("[DEBUG] After wire_to_str: username='%s', display='%s'\n", username, display_name);
+    
     int result = auth_register(username, display_name, password);
     if (result > 0) {
         char response[64];
         snprintf(response, sizeof(response), "OK %d", result);
         nh_send_to(sock, response, client_addr);
+        printf("[DEBUG] Registration successful: user_id=%d\n", result);
     } else {
-        nh_send_to(sock, err_string(result), client_addr);
+        printf("[DEBUG] Registration failed: result=%d\n", result);
+        nh_send_to(sock, result == ERR_DUPLICATE ? "ERR_DUPLICATE" : "ERR_AUTH", client_addr);
     }
 }
 
 static void cmd_login(int sock, struct sockaddr_in *client_addr, char *args) {
+    printf("[DEBUG] Login command from %s:%d: args='%s'\n", 
+           inet_ntoa(client_addr->sin_addr), ntohs(client_addr->sin_port), 
+           args ? args : "(null)");
+    
     char *username = strtok(args, " ");
     char *password = strtok(NULL, " ");
     
+    printf("[DEBUG] Parsed login: username='%s', password='%s'\n", 
+           username ? username : "(null)", password ? password : "(null)");
+    
     if (!username || !password) {
+        printf("[DEBUG] Login failed: missing fields\n");
         nh_send_to(sock, "ERR_AUTH", client_addr);
         return;
     }
     
     wire_to_str(username);
+    printf("[DEBUG] After wire_to_str: username='%s'\n", username);
     
     int result = auth_login(username, password);
+    printf("[DEBUG] auth_login result: %d\n", result);
+    
     if (result > 0) {
-        const char *display_name = auth_get_display_name();
-        char wire_name[MAX_NAME_LEN];
-        strncpy(wire_name, display_name, sizeof(wire_name) - 1);
-        wire_name[sizeof(wire_name) - 1] = '\0';
-        str_to_wire(wire_name);
+        // Get user info from auth system
+        int user_idx = auth_find_user_by_name(username);
+        const char *display_name = (user_idx >= 0) ? g_users[user_idx].display_name : username;
+        const char *user_name = (user_idx >= 0) ? g_users[user_idx].username : username;
         
-        char response[128];
-        snprintf(response, sizeof(response), "OK %d %s", result, wire_name);
-        nh_send_to(sock, response, client_addr);
+        printf("[DEBUG] Login successful, creating session for user_id=%d\n", result);
+        
+        // Create session for this client
+        if (session_login(*client_addr, result, display_name, username) == 0) {
+            char wire_name[MAX_NAME_LEN];
+            strncpy(wire_name, display_name, sizeof(wire_name) - 1);
+            wire_name[sizeof(wire_name) - 1] = '\0';
+            str_to_wire(wire_name);
+            
+            char response[128];
+            snprintf(response, sizeof(response), "OK %d %s", result, wire_name);
+            nh_send_to(sock, response, client_addr);
+            printf("[DEBUG] Login response sent: %s\n", response);
+        } else {
+            printf("[DEBUG] Failed to create session\n");
+            nh_send_to(sock, "ERR_AUTH", client_addr);
+        }
     } else {
+        printf("[DEBUG] Login failed: result=%d\n", result);
         nh_send_to(sock, err_string(result), client_addr);
     }
 }
 
-static void cmd_logout(int sock, struct sockaddr_in *client_addr) {
-    auth_logout();
+static void cmd_logout(int sock, struct sockaddr_in *client_addr, char *args) {
+    (void)args;
+    session_logout(*client_addr);
     nh_send_to(sock, "OK", client_addr);
 }
 
@@ -97,14 +138,23 @@ static void cmd_create_group(int sock, struct sockaddr_in *client_addr, char *ar
         return;
     }
     
+    // Check if user is logged in
+    int user_id = session_get_user_id(client_addr);
+    if (user_id == -1) {
+        printf("[DEBUG] Create group failed: user not logged in (user_id=%d)\n", user_id);
+        nh_send_to(sock, "ERR_AUTH", client_addr);
+        return;
+    }
+    
     if (!description || utils_is_empty(description)) {
         description = "No description";
     }
     
     wire_to_str(group_name);
+    wire_to_str(description);
     
-    int result = grp_create(group_name, description);
-    if (result > 0) {
+    int result = grp_create(group_name, description, user_id);
+    if (result == SUCCESS) {
         char response[64];
         snprintf(response, sizeof(response), "OK %d", result);
         nh_send_to(sock, response, client_addr);
@@ -487,14 +537,14 @@ static void sigchld_handler(int sig) {
     while (waitpid(-1, NULL, WNOHANG) > 0);
 }
 
-int main() {
-    if (fio_init_files() != SUCCESS) {
-        printf("Failed to initialize data files.\n");
-        return 1;
-    }
+int main(void) {
+    // Initialize session management
+    session_init();
     
-    if (fio_load_all() != SUCCESS) {
-        printf("Failed to load data.\n");
+    // Load data from files
+    int result = fio_load_all();
+    if (result != SUCCESS) {
+        printf("Failed to load data files. Exiting.\n");
         return 1;
     }
     
@@ -505,39 +555,24 @@ int main() {
     }
     
     printf("Group Chat UDP Server ready. Waiting for datagrams...\n");
-
-    // Install SIGCHLD handler to prevent zombie slave processes
-    struct sigaction sa;
-    sa.sa_handler = sigchld_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART | SA_NOCLDWAIT;
-    sigaction(SIGCHLD, &sa, NULL);
-
-    // Open POSIX message queue for master-slave communication
-    struct mq_attr attr;
-    attr.mq_flags = 0;
-    attr.mq_maxmsg = MQ_MAX_MSG;
-    attr.mq_msgsize = sizeof(DgramMsg);
-    attr.mq_curmsgs = 0;
-    mqd_t mq = mq_open(MQ_NAME, O_CREAT | O_RDWR, 0666, &attr);
-    if (mq == (mqd_t)-1) {
-        perror("mq_open");
-        return 1;
-    }
-
-    // Main loop - master process receives datagrams and forks slaves
-    while (1) {
-        DgramMsg msg;
-
-        // MASTER receives the datagram from any client
-        int r = nh_recv_from(server_fd, msg.cmd_buf, CMD_BUF_LEN, &msg.client_addr);
-        if (r == ERR_CONN) continue;
-
-        // MASTER pushes the full datagram (content + client address) into the queue
-        if (mq_send(mq, (char *)&msg, sizeof(DgramMsg), 0) == -1) {
-            perror("mq_send");
+    
+    // Main UDP server loop
+    while (!s_quit) {
+        char cmd_buf[CMD_BUF_LEN];
+        struct sockaddr_in client_addr;
+        
+        int r = nh_recv_from(server_fd, cmd_buf, CMD_BUF_LEN, &client_addr);
+        if (r == ERR_CONN) {
+            printf("Receive failed. Waiting...\n");
             continue;
         }
+        
+        printf("CMD [%s] from %s:%d, user_id=%d\n", 
+               cmd_buf, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port), 
+               session_get_user_id(&client_addr));
+        
+        dispatch_command(server_fd, &client_addr, cmd_buf);
+    }   
 
         // MASTER forks a slave to handle this one datagram
         pid_t pid = fork();
