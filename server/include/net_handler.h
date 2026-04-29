@@ -1,11 +1,11 @@
 #ifndef NET_HANDLER_H
 #define NET_HANDLER_H
 
+#include <netinet/in.h>
+
 int  nh_server_init(int port);
-int  nh_server_accept(int server_fd);
-int  nh_client_connect(const char *ip, int port);
-int  nh_send_line(int fd, const char *msg);
-int  nh_recv_line(int fd, char *buf, int buf_len);
-void nh_close(int fd);
+int  nh_send_to(int sock, const char *msg, struct sockaddr_in *client_addr);
+int  nh_recv_from(int sock, char *buf, int buf_len, struct sockaddr_in *client_addr);
+void nh_close(int sock);
 
 #endif // NET_HANDLER_H

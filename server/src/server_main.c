@@ -1,6 +1,12 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <mqueue.h>
 #include "config.h"
 #include "file_io.h"
 #include "utils.h"
@@ -9,10 +15,8 @@
 #include "messaging.h"
 #include "net_handler.h"
 
-// Static quit flag
 static int s_quit = 0;
 
-// Helper - map return code to error string
 static const char *err_string(int code) {
     switch (code) {
         case ERR_NOT_FOUND:  return "ERR_NOT_FOUND";
@@ -25,23 +29,17 @@ static const char *err_string(int code) {
     }
 }
 
-// Helper - replace characters in a local buffer
-static void wire_to_str(char *str) {
-    utils_replace_char(str, '_', ' ');
-}
-
-static void str_to_wire(char *str) {
-    utils_replace_char(str, ' ', '_');
-}
+static void wire_to_str(char *str) { utils_replace_char(str, '_', ' '); }
+static void str_to_wire(char *str) { utils_replace_char(str, ' ', '_'); }
 
 // Command handlers
-static void cmd_register(int client_fd, char *args) {
+static void cmd_register(int sock, struct sockaddr_in *client_addr, char *args) {
     char *username = strtok(args, " ");
     char *display_name = strtok(NULL, " ");
     char *password = strtok(NULL, " ");
     
     if (!username || !display_name || !password) {
-        nh_send_line(client_fd, "ERR_AUTH");
+        nh_send_to(sock, "ERR_AUTH", client_addr);
         return;
     }
     
@@ -52,18 +50,18 @@ static void cmd_register(int client_fd, char *args) {
     if (result > 0) {
         char response[64];
         snprintf(response, sizeof(response), "OK %d", result);
-        nh_send_line(client_fd, response);
+        nh_send_to(sock, response, client_addr);
     } else {
-        nh_send_line(client_fd, err_string(result));
+        nh_send_to(sock, err_string(result), client_addr);
     }
 }
 
-static void cmd_login(int client_fd, char *args) {
+static void cmd_login(int sock, struct sockaddr_in *client_addr, char *args) {
     char *username = strtok(args, " ");
     char *password = strtok(NULL, " ");
     
     if (!username || !password) {
-        nh_send_line(client_fd, "ERR_AUTH");
+        nh_send_to(sock, "ERR_AUTH", client_addr);
         return;
     }
     
@@ -79,23 +77,23 @@ static void cmd_login(int client_fd, char *args) {
         
         char response[128];
         snprintf(response, sizeof(response), "OK %d %s", result, wire_name);
-        nh_send_line(client_fd, response);
+        nh_send_to(sock, response, client_addr);
     } else {
-        nh_send_line(client_fd, err_string(result));
+        nh_send_to(sock, err_string(result), client_addr);
     }
 }
 
-static void cmd_logout(int client_fd) {
+static void cmd_logout(int sock, struct sockaddr_in *client_addr) {
     auth_logout();
-    nh_send_line(client_fd, "OK");
+    nh_send_to(sock, "OK", client_addr);
 }
 
-static void cmd_create_group(int client_fd, char *args) {
+static void cmd_create_group(int sock, struct sockaddr_in *client_addr, char *args) {
     char *group_name = strtok(args, " ");
     char *description = args + strlen(group_name) + 1;
     
     if (!group_name) {
-        nh_send_line(client_fd, "ERR_AUTH");
+        nh_send_to(sock, "ERR_AUTH", client_addr);
         return;
     }
     
@@ -109,35 +107,35 @@ static void cmd_create_group(int client_fd, char *args) {
     if (result > 0) {
         char response[64];
         snprintf(response, sizeof(response), "OK %d", result);
-        nh_send_line(client_fd, response);
+        nh_send_to(sock, response, client_addr);
     } else {
-        nh_send_line(client_fd, err_string(result));
+        nh_send_to(sock, err_string(result), client_addr);
     }
 }
 
-static void cmd_join_group(int client_fd, char *args) {
+static void cmd_join_group(int sock, struct sockaddr_in *client_addr, char *args) {
     int group_id = atoi(args);
     int result = grp_join(group_id);
     
     if (result == SUCCESS) {
-        nh_send_line(client_fd, "OK");
+        nh_send_to(sock, "OK", client_addr);
     } else {
-        nh_send_line(client_fd, err_string(result));
+        nh_send_to(sock, err_string(result), client_addr);
     }
 }
 
-static void cmd_leave_group(int client_fd, char *args) {
+static void cmd_leave_group(int sock, struct sockaddr_in *client_addr, char *args) {
     int group_id = atoi(args);
     int result = grp_leave(group_id);
     
     if (result == SUCCESS) {
-        nh_send_line(client_fd, "OK");
+        nh_send_to(sock, "OK", client_addr);
     } else {
-        nh_send_line(client_fd, err_string(result));
+        nh_send_to(sock, err_string(result), client_addr);
     }
 }
 
-static void cmd_search_groups(int client_fd, char *args) {
+static void cmd_search_groups(int sock, struct sockaddr_in *client_addr, char *args) {
     char *keyword = args;
     utils_trim(keyword);
     
@@ -145,7 +143,7 @@ static void cmd_search_groups(int client_fd, char *args) {
     int found = grp_search(keyword, result_ids, MAX_GROUPS);
     
     if (found == 0) {
-        nh_send_line(client_fd, "ERR_NOT_FOUND");
+        nh_send_to(sock, "ERR_NOT_FOUND", client_addr);
         return;
     }
     
@@ -167,15 +165,15 @@ static void cmd_search_groups(int client_fd, char *args) {
         char line[256];
         snprintf(line, sizeof(line), "%d %s %d %s", 
                 g->group_id, wire_name, g->member_count, wire_desc);
-        nh_send_line(client_fd, line);
+        nh_send_to(sock, line, client_addr);
     }
     
-    nh_send_line(client_fd, "END");
+    nh_send_to(sock, "END", client_addr);
 }
 
-static void cmd_list_my_groups(int client_fd) {
+static void cmd_list_my_groups(int sock, struct sockaddr_in *client_addr) {
     if (!auth_is_logged_in()) {
-        nh_send_line(client_fd, "ERR_AUTH");
+        nh_send_to(sock, "ERR_AUTH", client_addr);
         return;
     }
     
@@ -184,7 +182,7 @@ static void cmd_list_my_groups(int client_fd) {
     int found = grp_get_member_groups(user_id, group_ids, MAX_GROUPS);
     
     if (found == 0) {
-        nh_send_line(client_fd, "ERR_EMPTY");
+        nh_send_to(sock, "ERR_EMPTY", client_addr);
         return;
     }
     
@@ -206,13 +204,13 @@ static void cmd_list_my_groups(int client_fd) {
         char line[256];
         snprintf(line, sizeof(line), "%d %s %d %s", 
                 g->group_id, wire_name, g->member_count, wire_desc);
-        nh_send_line(client_fd, line);
+        nh_send_to(sock, line, client_addr);
     }
     
-    nh_send_line(client_fd, "END");
+    nh_send_to(sock, "END", client_addr);
 }
 
-static void cmd_list_all_groups(int client_fd) {
+static void cmd_list_all_groups(int sock, struct sockaddr_in *client_addr) {
     int found = 0;
     
     for (int i = 0; i < g_group_count; i++) {
@@ -233,24 +231,24 @@ static void cmd_list_all_groups(int client_fd) {
         char line[256];
         snprintf(line, sizeof(line), "%d %s %d %s", 
                 g->group_id, wire_name, g->member_count, wire_desc);
-        nh_send_line(client_fd, line);
+        nh_send_to(sock, line, client_addr);
         found++;
     }
     
     if (found == 0) {
-        nh_send_line(client_fd, "ERR_EMPTY");
+        nh_send_to(sock, "ERR_EMPTY", client_addr);
         return;
     }
     
-    nh_send_line(client_fd, "END");
+    nh_send_to(sock, "END", client_addr);
 }
 
-static void cmd_list_members(int client_fd, char *args) {
+static void cmd_list_members(int sock, struct sockaddr_in *client_addr, char *args) {
     int group_id = atoi(args);
     int idx = grp_find_by_id(group_id);
     
     if (idx == ERR_NOT_FOUND) {
-        nh_send_line(client_fd, "ERR_NOT_FOUND");
+        nh_send_to(sock, "ERR_NOT_FOUND", client_addr);
         return;
     }
     
@@ -272,19 +270,19 @@ static void cmd_list_members(int client_fd, char *args) {
             snprintf(line, sizeof(line), "%d Unknown unknown", g->member_ids[i]);
         }
         
-        nh_send_line(client_fd, line);
+        nh_send_to(sock, line, client_addr);
     }
     
-    nh_send_line(client_fd, "END");
+    nh_send_to(sock, "END", client_addr);
 }
 
-static void cmd_send_msg(int client_fd, char *args) {
+static void cmd_send_msg(int sock, struct sockaddr_in *client_addr, char *args) {
     char *group_id_str = strtok(args, " ");
     char *reply_to_str = strtok(NULL, " ");
     char *content = strtok(NULL, "");
     
     if (!group_id_str || !reply_to_str || !content) {
-        nh_send_line(client_fd, "ERR_UNKNOWN");
+        nh_send_to(sock, "ERR_UNKNOWN", client_addr);
         return;
     }
     
@@ -295,23 +293,23 @@ static void cmd_send_msg(int client_fd, char *args) {
     if (result > 0) {
         char response[64];
         snprintf(response, sizeof(response), "OK %d", result);
-        nh_send_line(client_fd, response);
+        nh_send_to(sock, response, client_addr);
     } else {
-        nh_send_line(client_fd, err_string(result));
+        nh_send_to(sock, err_string(result), client_addr);
     }
 }
 
-static void cmd_view_msgs(int client_fd, char *args) {
+static void cmd_view_msgs(int sock, struct sockaddr_in *client_addr, char *args) {
     int group_id = atoi(args);
     
     int idx = grp_find_by_id(group_id);
     if (idx == ERR_NOT_FOUND) {
-        nh_send_line(client_fd, "ERR_NOT_FOUND");
+        nh_send_to(sock, "ERR_NOT_FOUND", client_addr);
         return;
     }
     
     if (!auth_is_logged_in() || !grp_is_member(idx, auth_get_user_id())) {
-        nh_send_line(client_fd, "ERR_PERMISSION");
+        nh_send_to(sock, "ERR_PERMISSION", client_addr);
         return;
     }
     
@@ -319,14 +317,13 @@ static void cmd_view_msgs(int client_fd, char *args) {
     int top_count = msg_get_for_group(group_id, top_indices, MAX_MESSAGES);
     
     if (top_count == 0) {
-        nh_send_line(client_fd, "ERR_EMPTY");
+        nh_send_to(sock, "ERR_EMPTY", client_addr);
         return;
     }
     
     for (int i = 0; i < top_count; i++) {
         Message *msg = &g_messages[top_indices[i]];
         
-        // Get sender display name
         const char *sender_name = "Unknown";
         int uidx = auth_find_user_by_id(msg->sender_id);
         if (uidx >= 0) {
@@ -338,7 +335,6 @@ static void cmd_view_msgs(int client_fd, char *args) {
         wire_name[sizeof(wire_name) - 1] = '\0';
         str_to_wire(wire_name);
         
-        // Format timestamp
         char time_buf[64];
         utils_format_time(msg->sent_at, time_buf, sizeof(time_buf));
         str_to_wire(time_buf);
@@ -346,9 +342,8 @@ static void cmd_view_msgs(int client_fd, char *args) {
         char line[CMD_BUF_LEN];
         snprintf(line, sizeof(line), "MSG %d %s %s %s", 
                 msg->msg_id, wire_name, time_buf, msg->content);
-        nh_send_line(client_fd, line);
+        nh_send_to(sock, line, client_addr);
         
-        // Load replies
         int reply_indices[MAX_MESSAGES];
         int reply_count = msg_get_replies(msg->msg_id, reply_indices, MAX_MESSAGES);
         
@@ -373,27 +368,27 @@ static void cmd_view_msgs(int client_fd, char *args) {
             char reply_line[CMD_BUF_LEN];
             snprintf(reply_line, sizeof(reply_line), "REPLY %d %s %s %s", 
                     reply->msg_id, reply_wire_name, reply_time_buf, reply->content);
-            nh_send_line(client_fd, reply_line);
+            nh_send_to(sock, reply_line, client_addr);
         }
     }
     
-    nh_send_line(client_fd, "END");
+    nh_send_to(sock, "END", client_addr);
 }
 
-static void cmd_delete_msg(int client_fd, char *args) {
+static void cmd_delete_msg(int sock, struct sockaddr_in *client_addr, char *args) {
     int msg_id = atoi(args);
     int result = msg_delete(msg_id);
     
     if (result == SUCCESS) {
-        nh_send_line(client_fd, "OK");
+        nh_send_to(sock, "OK", client_addr);
     } else {
-        nh_send_line(client_fd, err_string(result));
+        nh_send_to(sock, err_string(result), client_addr);
     }
 }
 
-static void cmd_list_users(int client_fd) {
+static void cmd_list_users(int sock, struct sockaddr_in *client_addr) {
     if (!auth_is_logged_in()) {
-        nh_send_line(client_fd, "ERR_AUTH");
+        nh_send_to(sock, "ERR_AUTH", client_addr);
         return;
     }
     
@@ -409,32 +404,31 @@ static void cmd_list_users(int client_fd) {
         char line[128];
         snprintf(line, sizeof(line), "%d %s %s", 
                 g_users[i].user_id, wire_name, g_users[i].username);
-        nh_send_line(client_fd, line);
+        nh_send_to(sock, line, client_addr);
         found++;
     }
     
     if (found == 0) {
-        nh_send_line(client_fd, "ERR_EMPTY");
+        nh_send_to(sock, "ERR_EMPTY", client_addr);
         return;
     }
     
-    nh_send_line(client_fd, "END");
+    nh_send_to(sock, "END", client_addr);
 }
 
-static void cmd_quit(int client_fd) {
-    nh_send_line(client_fd, "OK");
+static void cmd_quit(int sock, struct sockaddr_in *client_addr) {
+    nh_send_to(sock, "OK", client_addr);
     s_quit = 1;
 }
 
-// Command dispatcher
-static void dispatch_command(int client_fd, char *cmd_buf) {
+static void dispatch_command(int sock, struct sockaddr_in *client_addr, char *cmd_buf) {
     char cmd_copy[CMD_BUF_LEN];
     strncpy(cmd_copy, cmd_buf, sizeof(cmd_copy) - 1);
     cmd_copy[sizeof(cmd_copy) - 1] = '\0';
     
     char *verb = strtok(cmd_copy, " ");
     if (!verb) {
-        nh_send_line(client_fd, "ERR_UNKNOWN");
+        nh_send_to(sock, "ERR_UNKNOWN", client_addr);
         return;
     }
     
@@ -444,98 +438,146 @@ static void dispatch_command(int client_fd, char *cmd_buf) {
     }
     
     if (strcmp(verb, "REGISTER") == 0) {
-        cmd_register(client_fd, args);
+        cmd_register(sock, client_addr, args);
     } else if (strcmp(verb, "LOGIN") == 0) {
-        cmd_login(client_fd, args);
+        cmd_login(sock, client_addr, args);
     } else if (strcmp(verb, "LOGOUT") == 0) {
-        cmd_logout(client_fd);
+        cmd_logout(sock, client_addr);
     } else if (strcmp(verb, "CREATE_GROUP") == 0) {
-        cmd_create_group(client_fd, args);
+        cmd_create_group(sock, client_addr, args);
     } else if (strcmp(verb, "JOIN_GROUP") == 0) {
-        cmd_join_group(client_fd, args);
+        cmd_join_group(sock, client_addr, args);
     } else if (strcmp(verb, "LEAVE_GROUP") == 0) {
-        cmd_leave_group(client_fd, args);
+        cmd_leave_group(sock, client_addr, args);
     } else if (strcmp(verb, "SEARCH_GROUPS") == 0) {
-        cmd_search_groups(client_fd, args);
+        cmd_search_groups(sock, client_addr, args);
     } else if (strcmp(verb, "LIST_MY_GROUPS") == 0) {
-        cmd_list_my_groups(client_fd);
+        cmd_list_my_groups(sock, client_addr);
     } else if (strcmp(verb, "LIST_ALL_GROUPS") == 0) {
-        cmd_list_all_groups(client_fd);
+        cmd_list_all_groups(sock, client_addr);
     } else if (strcmp(verb, "LIST_MEMBERS") == 0) {
-        cmd_list_members(client_fd, args);
+        cmd_list_members(sock, client_addr, args);
     } else if (strcmp(verb, "SEND_MSG") == 0) {
-        cmd_send_msg(client_fd, args);
+        cmd_send_msg(sock, client_addr, args);
     } else if (strcmp(verb, "VIEW_MSGS") == 0) {
-        cmd_view_msgs(client_fd, args);
+        cmd_view_msgs(sock, client_addr, args);
     } else if (strcmp(verb, "DELETE_MSG") == 0) {
-        cmd_delete_msg(client_fd, args);
+        cmd_delete_msg(sock, client_addr, args);
     } else if (strcmp(verb, "LIST_USERS") == 0) {
-        cmd_list_users(client_fd);
+        cmd_list_users(sock, client_addr);
     } else if (strcmp(verb, "QUIT") == 0) {
-        cmd_quit(client_fd);
+        cmd_quit(sock, client_addr);
     } else {
-        nh_send_line(client_fd, "ERR_UNKNOWN");
+        nh_send_to(sock, "ERR_UNKNOWN", client_addr);
     }
     
-    printf("CMD [%s] from user_id=%d\n", verb, auth_get_user_id());
+    printf("CMD [%s] from %s:%d, user_id=%d\n", verb,
+           inet_ntoa(client_addr->sin_addr), ntohs(client_addr->sin_port), auth_get_user_id());
 }
 
-// Session handler
-static void handle_session(int client_fd) {
-    auth_logout(); // Reset session at start
-    s_quit = 0;
-    
-    printf("New session started.\n");
-    
+// Message struct for master-slave communication via POSIX message queue
+typedef struct {
     char cmd_buf[CMD_BUF_LEN];
-    while (!s_quit) {
-        int result = nh_recv_line(client_fd, cmd_buf, CMD_BUF_LEN);
-        if (result == ERR_CONN) {
-            printf("Client disconnected unexpectedly.\n");
-            break;
-        }
-        
-        dispatch_command(client_fd, cmd_buf);
-    }
-    
-    fio_save_all(); // Save all data at end of session
-    nh_close(client_fd);
-    printf("Session ended. Data saved.\n");
+    struct sockaddr_in client_addr;
+} DgramMsg;
+
+// SIGCHLD handler to prevent zombie slave processes
+static void sigchld_handler(int sig) {
+    (void)sig;
+    while (waitpid(-1, NULL, WNOHANG) > 0);
 }
 
-// Main function
 int main() {
-    // Initialize data files
     if (fio_init_files() != SUCCESS) {
-        printf("Failed to initialise data files.\n");
+        printf("Failed to initialize data files.\n");
         return 1;
     }
     
-    // Load data
     if (fio_load_all() != SUCCESS) {
         printf("Failed to load data.\n");
         return 1;
     }
     
-    // Start server
     int server_fd = nh_server_init(SERVER_PORT);
     if (server_fd == ERR_CONN) {
-        printf("Failed to start server.\n");
+        printf("Failed to start UDP server.\n");
         return 1;
     }
     
-    printf("Group Chat Server ready. Waiting for connections...\n");
-    
-    // Main accept loop
+    printf("Group Chat UDP Server ready. Waiting for datagrams...\n");
+
+    // Install SIGCHLD handler to prevent zombie slave processes
+    struct sigaction sa;
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDWAIT;
+    sigaction(SIGCHLD, &sa, NULL);
+
+    // Open POSIX message queue for master-slave communication
+    struct mq_attr attr;
+    attr.mq_flags = 0;
+    attr.mq_maxmsg = MQ_MAX_MSG;
+    attr.mq_msgsize = sizeof(DgramMsg);
+    attr.mq_curmsgs = 0;
+    mqd_t mq = mq_open(MQ_NAME, O_CREAT | O_RDWR, 0666, &attr);
+    if (mq == (mqd_t)-1) {
+        perror("mq_open");
+        return 1;
+    }
+
+    // Main loop - master process receives datagrams and forks slaves
     while (1) {
-        int client_fd = nh_server_accept(server_fd);
-        if (client_fd == ERR_CONN) {
-            printf("Accept failed. Waiting...\n");
+        DgramMsg msg;
+
+        // MASTER receives the datagram from any client
+        int r = nh_recv_from(server_fd, msg.cmd_buf, CMD_BUF_LEN, &msg.client_addr);
+        if (r == ERR_CONN) continue;
+
+        // MASTER pushes the full datagram (content + client address) into the queue
+        if (mq_send(mq, (char *)&msg, sizeof(DgramMsg), 0) == -1) {
+            perror("mq_send");
             continue;
         }
-        
-        handle_session(client_fd);
+
+        // MASTER forks a slave to handle this one datagram
+        pid_t pid = fork();
+
+        if (pid < 0) {
+            perror("fork");
+            continue;
+        }
+
+        if (pid == 0) {
+            // SLAVE PROCESS
+            // Slave reads the datagram that the master placed in the queue
+            DgramMsg slave_msg;
+            if (mq_receive(mq, (char *)&slave_msg, sizeof(DgramMsg), NULL) == -1) {
+                perror("mq_receive");
+                exit(1);
+            }
+
+            // Slave resets auth state — each datagram is stateless
+            auth_logout();
+
+            // Slave processes the command using the datagram content and client address from the queue
+            dispatch_command(server_fd, &slave_msg.client_addr, slave_msg.cmd_buf);
+
+            // Slave saves data to file after processing
+            fio_save_all();
+
+            // Slave exits — it handled exactly one datagram
+            mq_close(mq);
+            exit(0);
+        }
+
+        // MASTER loops back immediately to receive the next datagram
+        // It does not wait for the slave to finish
     }
-    
+
+    // Cleanup (unreachable in infinite loop but good practice)
+    mq_close(mq);
+    mq_unlink(MQ_NAME);
+
+    nh_close(server_fd);
     return 0;
 }

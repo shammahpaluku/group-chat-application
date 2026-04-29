@@ -23,6 +23,7 @@ void handle_login();
 
 // Global state
 static int  g_sock        = -1;
+static struct sockaddr_in g_server_addr;
 static int  g_user_id     = -1;
 static char g_display_name[64];
 static char g_username[64];
@@ -33,14 +34,14 @@ static char g_current_group_name[64];
 
 // Core helper functions
 void client_send_recv(const char *cmd, char *response, int resp_len) {
-    if (nh_send_line(g_sock, cmd) != SUCCESS) {
-        printf("\n[!] Lost connection to server. Exiting.\n");
+    if (nh_send_to(g_sock, cmd, &g_server_addr) != SUCCESS) {
+        printf("\n[!] Failed to send command. Exiting.\n");
         nh_close(g_sock);
         exit(1);
     }
     
-    if (nh_recv_line(g_sock, response, resp_len) != SUCCESS) {
-        printf("\n[!] Lost connection to server. Exiting.\n");
+    if (nh_recv_from(g_sock, response, resp_len) != SUCCESS) {
+        printf("\n[!] Failed to receive response. Exiting.\n");
         nh_close(g_sock);
         exit(1);
     }
@@ -49,8 +50,8 @@ void client_send_recv(const char *cmd, char *response, int resp_len) {
 void client_recv_multiline() {
     char line[CMD_BUF_LEN];
     while (1) {
-        if (nh_recv_line(g_sock, line, CMD_BUF_LEN) != SUCCESS) {
-            printf("\n[!] Lost connection to server. Exiting.\n");
+        if (nh_recv_from(g_sock, line, CMD_BUF_LEN) != SUCCESS) {
+            printf("\n[!] Failed to receive response. Exiting.\n");
             nh_close(g_sock);
             exit(1);
         }
@@ -67,8 +68,8 @@ void client_recv_multiline() {
 void client_recv_into(char lines[][CMD_BUF_LEN], int max_lines, int *count) {
     *count = 0;
     while (*count < max_lines) {
-        if (nh_recv_line(g_sock, lines[*count], CMD_BUF_LEN) != SUCCESS) {
-            printf("\n[!] Lost connection to server. Exiting.\n");
+        if (nh_recv_from(g_sock, lines[*count], CMD_BUF_LEN) != SUCCESS) {
+            printf("\n[!] Failed to receive response. Exiting.\n");
             nh_close(g_sock);
             exit(1);
         }
@@ -86,7 +87,7 @@ void client_recv_into(char lines[][CMD_BUF_LEN], int max_lines, int *count) {
 void print_header(const char *title) {
     printf("\033[2J\033[H");
     printf("============================================================\n");
-    printf("  GROUP CHAT APPLICATION\n");
+    printf("  GROUP CHAT APPLICATION (UDP)\n");
     printf("  %s\n", title);
     printf("============================================================\n");
     printf("\n");
@@ -270,8 +271,8 @@ void handle_view_messages(int group_id) {
     int count = 0;
     
     while (count < MAX_MESSAGES) {
-        if (nh_recv_line(g_sock, lines[count], CMD_BUF_LEN) != SUCCESS) {
-            printf("\n[!] Lost connection to server. Exiting.\n");
+        if (nh_recv_from(g_sock, lines[count], CMD_BUF_LEN) != SUCCESS) {
+            printf("\n[!] Failed to receive response. Exiting.\n");
             nh_close(g_sock);
             exit(1);
         }
@@ -384,8 +385,8 @@ void group_menu(int group_id, const char *group_name) {
                 } else {
                     // Listen for multiline response
                     while (1) {
-                        if (nh_recv_line(g_sock, line, CMD_BUF_LEN) != SUCCESS) {
-                            printf("\n[!] Lost connection to server. Exiting.\n");
+                        if (nh_recv_from(g_sock, line, CMD_BUF_LEN) != SUCCESS) {
+                            printf("\n[!] Failed to receive response. Exiting.\n");
                             nh_close(g_sock);
                             exit(1);
                         }
@@ -420,7 +421,7 @@ void handle_my_groups() {
     while (1) {
         print_header("My Groups");
         
-        nh_send_line(g_sock, "LIST_MY_GROUPS");
+        nh_send_to(g_sock, "LIST_MY_GROUPS", &g_server_addr);
         
         char lines[MAX_GROUPS][CMD_BUF_LEN];
         int count = 0;
@@ -492,7 +493,7 @@ void handle_browse_groups() {
                 
                 char cmd[256];
                 snprintf(cmd, sizeof(cmd), "SEARCH_GROUPS %s", keyword);
-                nh_send_line(g_sock, cmd);
+                nh_send_to(g_sock, cmd, &g_server_addr);
                 
                 print_header("Search Results");
                 printf("Results for: \"%s\"\n\n", keyword);
@@ -529,15 +530,15 @@ void handle_browse_groups() {
                 break;
             }
             case 2: {
-                nh_send_line(g_sock, "LIST_ALL_GROUPS");
+                nh_send_to(g_sock, "LIST_ALL_GROUPS", &g_server_addr);
                 print_header("All Groups");
                 
                 char line[CMD_BUF_LEN];
                 int count = 0;
                 
                 while (1) {
-                    if (nh_recv_line(g_sock, line, CMD_BUF_LEN) != SUCCESS) {
-                        printf("\n[!] Lost connection to server. Exiting.\n");
+                    if (nh_recv_from(g_sock, line, CMD_BUF_LEN) != SUCCESS) {
+                        printf("\n[!] Failed to receive response. Exiting.\n");
                         nh_close(g_sock);
                         exit(1);
                     }
@@ -627,13 +628,13 @@ void handle_leave_group() {
     print_header("Leave a Group");
     
     // Show user their groups
-    nh_send_line(g_sock, "LIST_MY_GROUPS");
+    nh_send_to(g_sock, "LIST_MY_GROUPS", &g_server_addr);
     char line[CMD_BUF_LEN];
     int found = 0;
     
     while (1) {
-        if (nh_recv_line(g_sock, line, CMD_BUF_LEN) != SUCCESS) {
-            printf("\n[!] Lost connection to server. Exiting.\n");
+        if (nh_recv_from(g_sock, line, CMD_BUF_LEN) != SUCCESS) {
+            printf("\n[!] Failed to receive response. Exiting.\n");
             nh_close(g_sock);
             exit(1);
         }
@@ -674,14 +675,14 @@ void handle_leave_group() {
 // List Users
 void handle_list_users() {
     print_header("All Users");
-    nh_send_line(g_sock, "LIST_USERS");
+    nh_send_to(g_sock, "LIST_USERS", &g_server_addr);
     
     char line[CMD_BUF_LEN];
     int count = 0;
     
     while (1) {
-        if (nh_recv_line(g_sock, line, CMD_BUF_LEN) != SUCCESS) {
-            printf("\n[!] Lost connection to server. Exiting.\n");
+        if (nh_recv_from(g_sock, line, CMD_BUF_LEN) != SUCCESS) {
+            printf("\n[!] Failed to receive response. Exiting.\n");
             nh_close(g_sock);
             exit(1);
         }
@@ -854,17 +855,17 @@ int main(int argc, char *argv[]) {
         printf("[+] Using default server IP: %s\n", server_ip);
     }
     
-    // Connect
-    g_sock = nh_client_connect(server_ip, SERVER_PORT);
+    // Initialize UDP client
+    g_sock = nh_client_init(server_ip, SERVER_PORT, &g_server_addr);
     if (g_sock == ERR_CONN) {
         printf("============================================\n");
-        printf("  Cannot connect to Group Chat server.\n");
+        printf("  Cannot connect to Group Chat UDP server.\n");
         printf("  Expected: %s:%d\n", server_ip, SERVER_PORT);
         printf("  Please start server first.\n");
         printf("============================================\n");
         return 1;
     }
-    printf("[+] Connected to Group Chat server at %s:%d.\n", server_ip, SERVER_PORT);
+    printf("[+] Connected to Group Chat UDP server at %s:%d.\n", server_ip, SERVER_PORT);
     
     // Main unauthenticated menu loop
     while (1) {

@@ -23,6 +23,10 @@
 #define CMD_BUF_LEN     1024
 #define BACKLOG         5
 
+// POSIX message queue for master-slave communication
+#define MQ_NAME         "/groupchat_mq"
+#define MQ_MAX_MSG      10
+
 // Return codes
 #define SUCCESS         0
 #define ERR_FILE       -1
